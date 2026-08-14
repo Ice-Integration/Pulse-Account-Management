@@ -1,0 +1,1890 @@
+"""
+PulseLine Account API Service Implementation
+"""
+
+from typing import Any, Dict, Literal, Optional, Union
+
+from common_utils.custom_errors import InvalidEmailError
+from common_utils.tool_spec_decorator import ErrorObject, tool_spec
+from common_utils.utils import validate_email_util
+
+from pulseline_account_api.SimulationEngine import db, utils
+from pulseline_account_api.SimulationEngine.common_models import BaseAccountDetails
+from pulseline_account_api.SimulationEngine.custom_errors import (
+    AccountNotFoundError,
+    ActionNotSupportedError,
+    ServicePlanNotFoundError,
+    ValidationError,
+)
+from pulseline_account_api.SimulationEngine.endpoint_models import (
+    AccountInformationUpdateInput,
+    CancelInput,
+    CheckDeviceUpgradeEligibilityInput,
+    DeviceUpgradeEligibility,
+    EscalateInput,
+    FailInput,
+    GetCustomerAccountDetailsInput,
+    KnowledgeBaseQueryResponse,
+    KnowledgeBaseSnippet,
+    ModifyServicePlanOrFeatureInput,
+    QueryAccountOrdersInput,
+    QueryAvailablePlansAndFeaturesInput,
+    ServiceModificationResponse,
+    TerminalResponse,
+    UpdateAccountInformationInput,
+)
+from pulseline_account_api.SimulationEngine.phone_utils import (
+    is_phone_number_valid,
+    normalize_phone_number,
+)
+
+DB = db.DB
+
+
+@tool_spec(
+    input_model=GetCustomerAccountDetailsInput,
+    output_model=BaseAccountDetails,
+    error_model=[
+        ErrorObject(
+            ValidationError,
+            [
+                "Raised when accountId is missing, isn't a string, or fails validation.",
+            ],
+        ),
+        ErrorObject(AccountNotFoundError, ["Raised when accountId doesn't exist in the database."]),
+    ],
+    spec={
+        "name": "get_customer_account_details",
+        "description": """ Pulls the full detail set for a given customer account.
+
+        When to Use:
+        - After a customer's identity has been confirmed and verified.
+        - Use this to answer questions about billing address, contact info,
+          service plans, active features, or devices tied to the account.
+        - Call this before attempting any account modification. """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accountId": {
+                    "type": "string",
+                    "description": """ The customer's account identifier or phone number.
+                    Example: "ACC123456789" or "222-334-4556" """,
+                }
+            },
+            "required": ["accountId"],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary holding the customer's complete account details:",
+            "properties": {
+                "accountId": {
+                    "type": "string",
+                    "description": "Customer's unique account identifier",
+                },
+                "customerName": {"type": "string", "description": "Customer's full name"},
+                "contactEmail": {"type": "string", "description": "Primary contact email address"},
+                "contactPhone": {"type": "string", "description": "Primary contact phone number"},
+                "billingAddress": {
+                    "type": "object",
+                    "description": "Billing address information",
+                    "properties": {
+                        "recipientName": {
+                            "type": "string",
+                            "description": "Name for billing address",
+                        },
+                        "streetAddressLine1": {
+                            "type": "string",
+                            "description": "Primary street address",
+                        },
+                        "streetAddressLine2": {
+                            "type": "string",
+                            "description": "Secondary address line (apt, suite, etc.)",
+                            "nullable": True,
+                        },
+                        "city": {"type": "string", "description": "City name"},
+                        "state": {"type": "string", "description": "State or province code"},
+                        "zipCode": {"type": "string", "description": "ZIP or postal code"},
+                        "country": {"type": "string", "description": "Country code (e.g., US, CA)"},
+                    },
+                    "required": [
+                        "recipientName",
+                        "streetAddressLine1",
+                        "city",
+                        "state",
+                        "zipCode",
+                        "country",
+                    ],
+                },
+                "serviceAddress": {
+                    "type": "object",
+                    "description": "Service installation address",
+                    "properties": {
+                        "recipientName": {
+                            "type": "string",
+                            "description": "Name for service installation address",
+                        },
+                        "streetAddressLine1": {
+                            "type": "string",
+                            "description": "Primary street address",
+                        },
+                        "streetAddressLine2": {
+                            "type": "string",
+                            "description": "Secondary address line (apt, suite, etc.)",
+                            "nullable": True,
+                        },
+                        "city": {"type": "string", "description": "City name"},
+                        "state": {"type": "string", "description": "State or province code"},
+                        "zipCode": {"type": "string", "description": "ZIP or postal code"},
+                        "country": {"type": "string", "description": "Country code (e.g., US, CA)"},
+                    },
+                    "required": [
+                        "recipientName",
+                        "streetAddressLine1",
+                        "city",
+                        "state",
+                        "zipCode",
+                        "country",
+                    ],
+                },
+                "communicationPreferences": {
+                    "type": "object",
+                    "description": "Email and SMS preferences",
+                    "properties": {
+                        "emailOptIn": {
+                            "type": "boolean",
+                            "description": "Whether the customer wants email communications",
+                        },
+                        "smsOptIn": {
+                            "type": "boolean",
+                            "description": "Whether the customer wants SMS communications",
+                        },
+                    },
+                    "required": ["emailOptIn", "smsOptIn"],
+                },
+                "devices": {
+                    "type": "array",
+                    "description": "Devices tied to the account",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "deviceId": {
+                                "type": "string",
+                                "description": "Unique device identifier",
+                            },
+                            "deviceName": {"type": "string", "description": "Name of the device"},
+                            "lineNumber": {
+                                "type": "string",
+                                "description": "Phone number associated with the device",
+                            },
+                            "upgradeEligibilityDate": {
+                                "type": "string",
+                                "description": "Date when device becomes eligible for upgrade",
+                            },
+                            "paymentPlanActive": {
+                                "type": "boolean",
+                                "description": "Whether device has an active payment plan",
+                            },
+                            "paymentPlanRemainingMonths": {
+                                "type": "integer",
+                                "description": "Remaining months on payment plan",
+                            },
+                        },
+                        "required": [
+                            "deviceId",
+                            "deviceName",
+                            "lineNumber",
+                            "upgradeEligibilityDate",
+                            "paymentPlanActive",
+                            "paymentPlanRemainingMonths",
+                        ],
+                    },
+                },
+                "services": {
+                    "type": "array",
+                    "description": "Active service plans on the account",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "serviceId": {
+                                "type": "string",
+                                "description": "Unique identifier for the service",
+                            },
+                            "planName": {
+                                "type": "string",
+                                "description": "Name of the service plan",
+                            },
+                            "planId": {
+                                "type": "string",
+                                "description": "Unique identifier for the plan",
+                            },
+                            "monthlyCost": {
+                                "type": "number",
+                                "description": "Monthly cost of the service",
+                            },
+                            "dataAllowance": {
+                                "type": "string",
+                                "description": "Data allowance for the service (e.g., Unlimited, 10GB)",
+                                "nullable": True,
+                            },
+                            "activeFeatures": {
+                                "type": "array",
+                                "description": "Active features attached to this service",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "featureId": {
+                                            "type": "string",
+                                            "description": "Unique identifier for the feature",
+                                        },
+                                        "featureName": {
+                                            "type": "string",
+                                            "description": "Name of the feature",
+                                        },
+                                        "monthlyCost": {
+                                            "type": "number",
+                                            "description": "Monthly cost of the feature",
+                                        },
+                                    },
+                                    "required": ["featureId", "featureName", "monthlyCost"],
+                                },
+                            },
+                        },
+                        "required": [
+                            "serviceId",
+                            "planName",
+                            "planId",
+                            "monthlyCost",
+                            "activeFeatures",
+                        ],
+                    },
+                },
+                "isVerified": {"type": "boolean", "description": "Whether the account is verified"},
+                "securityPinSet": {
+                    "type": "boolean",
+                    "description": "Whether security PIN is configured",
+                },
+            },
+            "required": [
+                "accountId",
+                "customerName",
+                "contactEmail",
+                "contactPhone",
+                "billingAddress",
+                "serviceAddress",
+                "communicationPreferences",
+                "devices",
+                "services",
+                "isVerified",
+                "securityPinSet",
+            ],
+        },
+    },
+)
+def get_customer_account_details(
+    accountId: str,
+) -> Dict[str, Any]:
+    """
+    Pulls the full detail set for a given customer account.
+
+    When to Use:
+    - After a customer's identity has been confirmed and verified.
+    - Use this to answer questions about billing address, contact info,
+      service plans, active features, or devices tied to the account.
+    - Call this before attempting any account modification.
+
+    Args:
+        accountId (str): The customer's account identifier or phone number.
+            Example: "ACC123456789" or "222-334-4556"
+
+    Returns:
+        Dict[str, Any]: Dictionary holding the customer's complete account details:
+            - accountId (str): Customer's unique account identifier
+            - customerName (str): Customer's full name
+            - contactEmail (str): Primary contact email address
+            - contactPhone (str): Primary contact phone number
+            - billingAddress (Dict[str, Union[str, None]]): Billing address information with fields:
+                - recipientName (str): Name for billing address
+                - streetAddressLine1 (str): Primary street address
+                - streetAddressLine2 (Optional[str]): Secondary address line (apt, suite, etc.)
+                - city (str): City name
+                - state (str): State or province code
+                - zipCode (str): ZIP or postal code
+                - country (str): Country code (e.g., US, CA)
+            - serviceAddress (Dict[str, Union[str, None]]): Service installation address with fields:
+                - recipientName (str): Name for service installation address
+                - streetAddressLine1 (str): Primary street address
+                - streetAddressLine2 (Optional[str]): Secondary address line (apt, suite, etc.)
+                - city (str): City name
+                - state (str): State or province code
+                - zipCode (str): ZIP or postal code
+                - country (str): Country code (e.g., US, CA)
+            - communicationPreferences (Dict[str, bool]): Email and SMS preferences with fields:
+                - emailOptIn (bool): Whether the customer wants email communications
+                - smsOptIn (bool): Whether the customer wants SMS communications
+            - devices (List[Dict[str, Union[str, bool, int]]]): Devices tied to the account with fields:
+                - deviceId (str): Unique device identifier
+                - deviceName (str): Name of the device
+                - lineNumber (str): Phone number associated with the device
+                - upgradeEligibilityDate (str): Date when device becomes eligible for upgrade
+                - paymentPlanActive (bool): Whether device has an active payment plan
+                - paymentPlanRemainingMonths (int): Remaining months on payment plan
+            - services (List[Dict[str, Any]]): Active service plans on the account with fields:
+                - serviceId (str): Unique identifier for the service
+                - planName (str): Name of the service plan
+                - planId (str): Unique identifier for the plan
+                - monthlyCost (float): Monthly cost of the service
+                - dataAllowance (Optional[str]): Data allowance for the service (e.g., Unlimited, 10GB)
+                - activeFeatures (List[Dict[str, Any]]): Active features attached to this service
+            - isVerified (bool): Whether the account is verified
+            - securityPinSet (bool): Whether security PIN is configured
+
+    Raises:
+        ValidationError: If accountId is missing, isn't a string, or fails validation.
+        AccountNotFoundError: If accountId doesn't exist in the database.
+    """
+    account_details = utils.get_account(accountId)
+
+    if account_details is None:
+        raise AccountNotFoundError(f"Account {accountId} not found in the database.")
+
+    # Convert the raw data to Pydantic model for validation
+    try:
+        validated_model = BaseAccountDetails(**account_details)
+        return validated_model.model_dump(mode="json")
+    except Exception as e:
+        raise ValidationError(f"Failed to validate account data: {str(e)}")
+
+
+@tool_spec(
+    input_model=UpdateAccountInformationInput,
+    output_model=BaseAccountDetails,
+    error_model=[
+        ErrorObject(
+            ValidationError,
+            [
+                "Raised when accountId is missing, isn't a string, the account can't be found, or validation fails.",
+                "Raised when billingAddress, serviceAddress, contactEmail, contactPhone, communicationPreferences, or securityPinSet break validation constraints (e.g., length, type).",
+            ],
+        ),
+        ErrorObject(AccountNotFoundError, ["Raised when accountId doesn't exist in the database."]),
+        ErrorObject(InvalidEmailError, ["Raised when contactEmail isn't a valid email address."]),
+    ],
+    spec={
+        "name": "update_account_information",
+        "description": """ Updates a customer's account information: contact details, billing address, and communication preferences.
+
+        This lets you modify various parts of a customer's account information.
+        Every field in requestBody is optional; only include what you want to change.
+        Fields left as None are skipped and left untouched. """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accountId": {
+                    "type": "string",
+                    "description": 'The customer\'s account identifier or phone number. Example: "ACC888777666" or "222-334-4556"',
+                },
+                "requestBody": {
+                    "type": "object",
+                    "description": """ Dictionary holding the new information to apply.
+                    Only include the fields you want to change; fields set to None are skipped.
+                    Supported fields: """,
+                    "properties": {
+                        "contactEmail": {
+                            "type": "string",
+                            "description": "New contact email address. Must be a valid email format.",
+                            "nullable": True,
+                        },
+                        "contactPhone": {
+                            "type": "string",
+                            "description": "New contact phone number in any valid format (e.g., 555-123-4567, (555) 123-4567, 5551234567). Gets normalized.",
+                            "nullable": True,
+                        },
+                        "billingAddress": {
+                            "type": "object",
+                            "description": "New billing address information with fields:",
+                            "properties": {
+                                "recipientName": {
+                                    "type": "string",
+                                    "description": "Name for billing address",
+                                    "nullable": True,
+                                },
+                                "streetAddressLine1": {
+                                    "type": "string",
+                                    "description": "Primary street address",
+                                    "nullable": True,
+                                },
+                                "streetAddressLine2": {
+                                    "type": "string",
+                                    "description": "Secondary address line (apt, suite, etc.)",
+                                    "nullable": True,
+                                },
+                                "city": {
+                                    "type": "string",
+                                    "description": "City name",
+                                    "nullable": True,
+                                },
+                                "state": {
+                                    "type": "string",
+                                    "description": "State or province code",
+                                    "nullable": True,
+                                },
+                                "zipCode": {
+                                    "type": "string",
+                                    "description": "ZIP or postal code",
+                                    "nullable": True,
+                                },
+                                "country": {
+                                    "type": "string",
+                                    "description": "Country code (e.g., US, CA)",
+                                    "nullable": True,
+                                },
+                            },
+                            "required": [],
+                            "nullable": True,
+                        },
+                        "serviceAddress": {
+                            "type": "object",
+                            "description": "New service installation address with fields:",
+                            "properties": {
+                                "recipientName": {
+                                    "type": "string",
+                                    "description": "Name for service installation address",
+                                    "nullable": True,
+                                },
+                                "streetAddressLine1": {
+                                    "type": "string",
+                                    "description": "Primary street address",
+                                    "nullable": True,
+                                },
+                                "streetAddressLine2": {
+                                    "type": "string",
+                                    "description": "Secondary address line (apt, suite, etc.)",
+                                    "nullable": True,
+                                },
+                                "city": {
+                                    "type": "string",
+                                    "description": "City name",
+                                    "nullable": True,
+                                },
+                                "state": {
+                                    "type": "string",
+                                    "description": "State or province code",
+                                    "nullable": True,
+                                },
+                                "zipCode": {
+                                    "type": "string",
+                                    "description": "ZIP or postal code",
+                                    "nullable": True,
+                                },
+                                "country": {
+                                    "type": "string",
+                                    "description": "Country code (e.g., US, CA)",
+                                    "nullable": True,
+                                },
+                            },
+                            "required": [],
+                            "nullable": True,
+                        },
+                        "communicationPreferences": {
+                            "type": "object",
+                            "description": "New communication preferences with fields:",
+                            "properties": {
+                                "emailOptIn": {
+                                    "type": "boolean",
+                                    "description": "Whether the customer wants email communications",
+                                    "nullable": True,
+                                },
+                                "smsOptIn": {
+                                    "type": "boolean",
+                                    "description": "Whether the customer wants SMS communications",
+                                    "nullable": True,
+                                },
+                            },
+                            "required": [],
+                            "nullable": True,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            "required": ["accountId", "requestBody"],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary showing the account's full, updated state including:",
+            "properties": {
+                "accountId": {
+                    "type": "string",
+                    "description": "Customer's unique account identifier",
+                },
+                "customerName": {"type": "string", "description": "Customer's full name"},
+                "contactEmail": {
+                    "type": "string",
+                    "description": "Updated contact email address (unchanged if not supplied)",
+                },
+                "contactPhone": {
+                    "type": "string",
+                    "description": "Updated contact phone number in any valid format (e.g., 555-123-4567, (555) 123-4567, 5551234567) (unchanged if not supplied).",
+                },
+                "billingAddress": {
+                    "type": "object",
+                    "description": "Updated billing address information (unchanged if not supplied)",
+                    "properties": {
+                        "recipientName": {
+                            "type": "string",
+                            "description": "Name for billing address",
+                        },
+                        "streetAddressLine1": {
+                            "type": "string",
+                            "description": "Primary street address",
+                        },
+                        "streetAddressLine2": {
+                            "type": "string",
+                            "description": "Secondary address line (apt, suite, etc.)",
+                            "nullable": True,
+                        },
+                        "city": {"type": "string", "description": "City name"},
+                        "state": {"type": "string", "description": "State or province code"},
+                        "zipCode": {"type": "string", "description": "ZIP or postal code"},
+                        "country": {"type": "string", "description": "Country code (e.g., US, CA)"},
+                    },
+                    "required": [
+                        "recipientName",
+                        "streetAddressLine1",
+                        "city",
+                        "state",
+                        "zipCode",
+                        "country",
+                    ],
+                },
+                "serviceAddress": {
+                    "type": "object",
+                    "description": "Service installation address (unchanged if not supplied)",
+                    "properties": {
+                        "recipientName": {
+                            "type": "string",
+                            "description": "Name for service installation address",
+                        },
+                        "streetAddressLine1": {
+                            "type": "string",
+                            "description": "Primary street address",
+                        },
+                        "streetAddressLine2": {
+                            "type": "string",
+                            "description": "Secondary address line (apt, suite, etc.)",
+                            "nullable": True,
+                        },
+                        "city": {"type": "string", "description": "City name"},
+                        "state": {"type": "string", "description": "State or province code"},
+                        "zipCode": {"type": "string", "description": "ZIP or postal code"},
+                        "country": {"type": "string", "description": "Country code (e.g., US, CA)"},
+                    },
+                    "required": [
+                        "recipientName",
+                        "streetAddressLine1",
+                        "city",
+                        "state",
+                        "zipCode",
+                        "country",
+                    ],
+                },
+                "communicationPreferences": {
+                    "type": "object",
+                    "description": "Updated communication preferences (unchanged if not supplied)",
+                    "properties": {
+                        "emailOptIn": {
+                            "type": "boolean",
+                            "description": "Whether the customer wants email communications",
+                        },
+                        "smsOptIn": {
+                            "type": "boolean",
+                            "description": "Whether the customer wants SMS communications",
+                        },
+                    },
+                    "required": ["emailOptIn", "smsOptIn"],
+                },
+                "devices": {
+                    "type": "array",
+                    "description": "Devices on the account (unchanged)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "deviceId": {
+                                "type": "string",
+                                "description": "Unique device identifier",
+                            },
+                            "deviceName": {"type": "string", "description": "Name of the device"},
+                            "lineNumber": {
+                                "type": "string",
+                                "description": "Phone number associated with the device",
+                            },
+                            "upgradeEligibilityDate": {
+                                "type": "string",
+                                "description": "Date when device becomes eligible for upgrade",
+                            },
+                            "paymentPlanActive": {
+                                "type": "boolean",
+                                "description": "Whether device has an active payment plan",
+                            },
+                            "paymentPlanRemainingMonths": {
+                                "type": "integer",
+                                "description": "Remaining months on payment plan",
+                            },
+                        },
+                        "required": [
+                            "deviceId",
+                            "deviceName",
+                            "lineNumber",
+                            "upgradeEligibilityDate",
+                            "paymentPlanActive",
+                            "paymentPlanRemainingMonths",
+                        ],
+                    },
+                },
+                "services": {
+                    "type": "array",
+                    "description": "Active service plans on the account (unchanged)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "serviceId": {
+                                "type": "string",
+                                "description": "Unique identifier for the service",
+                            },
+                            "planName": {
+                                "type": "string",
+                                "description": "Name of the service plan",
+                            },
+                            "planId": {
+                                "type": "string",
+                                "description": "Unique identifier for the plan",
+                            },
+                            "monthlyCost": {
+                                "type": "number",
+                                "description": "Monthly cost of the service",
+                            },
+                            "dataAllowance": {
+                                "type": "string",
+                                "description": "Data allowance for the service (e.g., Unlimited, 10GB)",
+                                "nullable": True,
+                            },
+                            "activeFeatures": {
+                                "type": "array",
+                                "description": "Active features attached to this service",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "featureId": {
+                                            "type": "string",
+                                            "description": "Unique identifier for the feature",
+                                        },
+                                        "featureName": {
+                                            "type": "string",
+                                            "description": "Name of the feature",
+                                        },
+                                        "monthlyCost": {
+                                            "type": "number",
+                                            "description": "Monthly cost of the feature",
+                                        },
+                                    },
+                                    "required": ["featureId", "featureName", "monthlyCost"],
+                                },
+                            },
+                        },
+                        "required": [
+                            "serviceId",
+                            "planName",
+                            "planId",
+                            "monthlyCost",
+                            "activeFeatures",
+                        ],
+                    },
+                },
+                "isVerified": {
+                    "type": "boolean",
+                    "description": "Whether the account is verified (unchanged)",
+                },
+                "securityPinSet": {
+                    "type": "boolean",
+                    "description": "Whether security PIN is configured (unchanged)",
+                },
+            },
+            "required": [
+                "accountId",
+                "customerName",
+                "contactEmail",
+                "contactPhone",
+                "billingAddress",
+                "serviceAddress",
+                "communicationPreferences",
+                "devices",
+                "services",
+                "isVerified",
+                "securityPinSet",
+            ],
+        },
+    },
+)
+def update_account_information(
+    accountId: str,
+    requestBody: Dict[str, Union[str, Dict[str, Union[str, bool, None]]]],
+) -> Dict[str, Any]:
+    """
+    Updates a customer's account information: contact details, billing address, and communication preferences.
+
+    This lets you modify various parts of a customer's account information.
+    Every field in requestBody is optional; only include what you want to change.
+    Fields left as None are skipped and left untouched.
+
+    Args:
+        accountId (str): The customer's account identifier or phone number. Example: "ACC888777666" or "222-334-4556"
+        requestBody (Dict[str, Union[str, Dict[str, Union[str, bool, None]]]]): Dictionary holding the new information to apply.
+            Only include the fields you want to change; fields set to None are skipped.
+            Supported fields:
+            - contactEmail (Optional[str]): New contact email address. Must be a valid email format.
+            - contactPhone (Optional[str]): New contact phone number in any valid format (e.g., 555-123-4567, (555) 123-4567, 5551234567). Gets normalized.
+            - billingAddress (Optional[Dict[str, Optional[str]]]): New billing address information with fields:
+                - recipientName (Optional[str]): Name for billing address
+                - streetAddressLine1 (Optional[str]): Primary street address
+                - streetAddressLine2 (Optional[str]): Secondary address line (apt, suite, etc.)
+                - city (Optional[str]): City name
+                - state (Optional[str]): State or province code
+                - zipCode (Optional[str]): ZIP or postal code
+                - country (Optional[str]): Country code (e.g., US, CA)
+            - serviceAddress (Optional[Dict[str, Optional[str]]]): New service installation address with fields:
+                - recipientName (Optional[str]): Name for service installation address
+                - streetAddressLine1 (Optional[str]): Primary street address
+                - streetAddressLine2 (Optional[str]): Secondary address line (apt, suite, etc.)
+                - city (Optional[str]): City name
+                - state (Optional[str]): State or province code
+                - zipCode (Optional[str]): ZIP or postal code
+                - country (Optional[str]): Country code (e.g., US, CA)
+            - communicationPreferences (Optional[Dict[str, Optional[bool]]]): New communication preferences with fields:
+                - emailOptIn (Optional[bool]): Whether the customer wants email communications
+                - smsOptIn (Optional[bool]): Whether the customer wants SMS communications
+
+    Returns:
+        Dict[str, Any]: Dictionary showing the account's full, updated state including:
+            - accountId (str): Customer's unique account identifier
+            - customerName (str): Customer's full name
+            - contactEmail (str): Updated contact email address (unchanged if not supplied)
+            - contactPhone (str): Updated contact phone number in any valid format (e.g., 555-123-4567, (555) 123-4567, 5551234567) (unchanged if not supplied).
+            - billingAddress (Dict[str, Union[str, None]]): Updated billing address information (unchanged if not supplied) with fields:
+                - recipientName (str): Name for billing address
+                - streetAddressLine1 (str): Primary street address
+                - streetAddressLine2 (Optional[str]): Secondary address line (apt, suite, etc.)
+                - city (str): City name
+                - state (str): State or province code
+                - zipCode (str): ZIP or postal code
+                - country (str): Country code (e.g., US, CA)
+            - serviceAddress (Dict[str, Union[str, None]]): Service installation address (unchanged if not supplied) with fields:
+                - recipientName (str): Name for service installation address
+                - streetAddressLine1 (str): Primary street address
+                - streetAddressLine2 (Optional[str]): Secondary address line (apt, suite, etc.)
+                - city (str): City name
+                - state (str): State or province code
+                - zipCode (str): ZIP or postal code
+                - country (str): Country code (e.g., US, CA)
+            - communicationPreferences (Dict[str, bool]): Updated communication preferences (unchanged if not supplied) with fields:
+                - emailOptIn (bool): Whether the customer wants email communications
+                - smsOptIn (bool): Whether the customer wants SMS communications
+            - devices (List[Dict[str, Union[str, bool, int]]]): Devices on the account with fields:
+                - deviceId (str): Unique device identifier
+                - deviceName (str): Name of the device
+                - lineNumber (str): Phone number associated with the device
+                - upgradeEligibilityDate (str): Date when device becomes eligible for upgrade
+                - paymentPlanActive (bool): Whether device has an active payment plan
+                - paymentPlanRemainingMonths (int): Remaining months on payment plan
+            - services (List[Dict[str, Any]]): Active service plans on the account (unchanged) with fields:
+                - serviceId (str): Unique identifier for the service
+                - planName (str): Name of the service plan
+                - planId (str): Unique identifier for the plan
+                - monthlyCost (float): Monthly cost of the service
+                - dataAllowance (Optional[str]): Data allowance for the service (e.g., Unlimited, 10GB)
+                - activeFeatures (List[Dict[str, Any]]): Active features attached to this service
+            - isVerified (bool): Whether the account is verified (unchanged)
+            - securityPinSet (bool): Whether security PIN is configured (unchanged)
+
+    Raises:
+        ValidationError: If accountId is missing, isn't a string, the account can't be found, or validation fails.
+        ValidationError: If billingAddress, serviceAddress, contactEmail, contactPhone, communicationPreferences, or securityPinSet break validation constraints (e.g., length, type).
+        AccountNotFoundError: If accountId doesn't exist in the database.
+        InvalidEmailError: If contactEmail isn't a valid email address.
+    """
+    # Validate the request body using Pydantic model
+    try:
+        validated_request = AccountInformationUpdateInput(**requestBody)
+    except Exception as e:
+        raise ValidationError(f"Invalid request body: {str(e)}")
+
+    # Use utils to verify account exists
+    account_details = utils.get_account(accountId)
+    if account_details is None:
+        raise AccountNotFoundError(f"Account {accountId} not found in the database.")
+
+    # Convert to dict for utils functions
+    request_dict = validated_request.model_dump(exclude_unset=True)
+    actual_account_id = account_details["accountId"]
+
+    # Validate email and phone if provided
+    if "contactEmail" in request_dict and request_dict["contactEmail"] is not None:
+        validate_email_util(request_dict["contactEmail"], "contactEmail")
+
+    if "contactPhone" in request_dict and request_dict["contactPhone"] is not None:
+        phone = request_dict["contactPhone"]
+        if not is_phone_number_valid(phone):
+            raise ValidationError(f"The phone number '{phone}' is not valid.")
+        # Normalize the phone number
+        request_dict["contactPhone"] = normalize_phone_number(phone)
+
+    # Use utils to update account
+    utils.update_account(actual_account_id, request_dict)
+
+    return get_customer_account_details(actual_account_id)
+
+
+@tool_spec(
+    input_model=CheckDeviceUpgradeEligibilityInput,
+    output_model=DeviceUpgradeEligibility,
+    error_model=[
+        ErrorObject(
+            ValidationError,
+            [
+                "Raised when accountId or identifier is missing/invalid, the account can't be found, or the device isn't on the account.",
+                "Raised when identifierType isn't 'LINE_NUMBER' or 'DEVICE_ID'.",
+            ],
+        ),
+        ErrorObject(AccountNotFoundError, ["Raised when accountId doesn't exist in the database."]),
+    ],
+    spec={
+        "name": "check_device_upgrade_eligibility",
+        "description": """ Checks whether a specific device or line on an account qualifies for an upgrade.
+
+        When to Use:
+        - Use this when a user asks "Can I upgrade my phone?", "Am I eligible
+        for an upgrade?", or a similar question about a device or phone line.
+
+        Eligibility Rules:
+        - A device qualifies for upgrade when it has no active payment plan (paymentPlanActive=False) AND it has a valid line number (lineNumber != "n/a")
+        - A device does NOT qualify when it has an active payment plan (paymentPlanActive=True) OR it has no line number (lineNumber="n/a") """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accountId": {
+                    "type": "string",
+                    "description": """ The customer's account identifier or phone number.
+                    Example: "ACC123456789" or "222-334-4556" """,
+                },
+                "identifier": {
+                    "type": "string",
+                    "description": """ The phone number or device ID to check. Examples:
+                    - For LINE_NUMBER: "555-123-4567"
+                    - For DEVICE_ID: "DEV987654321" """,
+                },
+                "identifierType": {
+                    "type": "string",
+                    "enum": ["LINE_NUMBER", "DEVICE_ID"],
+                    "description": """ Specifies what kind of
+                    identifier was provided. Must be one of:
+                    - "LINE_NUMBER": Use when searching by phone number
+                    - "DEVICE_ID": Use when searching by device identifier """,
+                },
+            },
+            "required": ["accountId", "identifier", "identifierType"],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary holding eligibility information:",
+            "properties": {
+                "isEligible": {
+                    "type": "boolean",
+                    "description": "Whether the device qualifies for an upgrade",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Explanation if not eligible",
+                    "nullable": True,
+                },
+                "remainingDevicePayments": {
+                    "type": "number",
+                    "description": "Remaining balance on payment plan",
+                    "nullable": True,
+                },
+                "eligibilityDate": {
+                    "type": "string",
+                    "description": "Date when device becomes eligible",
+                    "nullable": True,
+                },
+                "earlyUpgradeOptions": {
+                    "type": "string",
+                    "description": "Early upgrade options if available",
+                    "nullable": True,
+                },
+            },
+            "required": ["isEligible"],
+        },
+    },
+)
+def check_device_upgrade_eligibility(
+    accountId: str,
+    identifier: str,
+    identifierType: Literal["LINE_NUMBER", "DEVICE_ID"],
+) -> Dict[str, Any]:
+    """
+    Checks whether a specific device or line on an account qualifies for an upgrade.
+
+    When to Use:
+    - Use this when a user asks "Can I upgrade my phone?", "Am I eligible
+    for an upgrade?", or a similar question about a device or phone line.
+
+    Eligibility Rules:
+    - A device qualifies for upgrade when it has no active payment plan (paymentPlanActive=False) AND it has a valid line number (lineNumber != "n/a")
+    - A device does NOT qualify when it has an active payment plan (paymentPlanActive=True) OR it has no line number (lineNumber="n/a")
+
+    Args:
+        accountId (str): The customer's account identifier or phone number.
+            Example: "ACC123456789" or "222-334-4556"
+        identifier (str): The phone number or device ID to check. Examples:
+            - For LINE_NUMBER: "555-123-4567"
+            - For DEVICE_ID: "DEV987654321"
+        identifierType (Literal["LINE_NUMBER", "DEVICE_ID"]): Specifies what kind of
+            identifier was provided. Must be one of:
+            - "LINE_NUMBER": Use when searching by phone number
+            - "DEVICE_ID": Use when searching by device identifier
+
+    Returns:
+        Dict[str, Any]: Dictionary holding eligibility information:
+            - isEligible (bool): Whether the device qualifies for an upgrade
+            - reason (Optional[str]): Explanation if not eligible
+            - remainingDevicePayments (Optional[float]): Remaining balance on payment plan
+            - eligibilityDate (Optional[str]): Date when device becomes eligible
+            - earlyUpgradeOptions (Optional[str]): Early upgrade options if available
+
+    Raises:
+        ValidationError: If accountId or identifier is missing/invalid, the account can't be found,
+            or the device isn't on the account.
+        ValidationError: If identifierType isn't 'LINE_NUMBER' or 'DEVICE_ID'.
+        AccountNotFoundError: If accountId doesn't exist in the database.
+    """
+    # Validate phone number if identifierType is LINE_NUMBER
+    if identifierType == "LINE_NUMBER":
+        if not is_phone_number_valid(identifier):
+            raise ValidationError(f"The phone number '{identifier}' is not valid.")
+        # Normalize the phone number for comparison
+        identifier = normalize_phone_number(identifier)
+
+    # Use utils to get account information
+    account_information = utils.get_account(accountId)
+    if account_information is None:
+        raise AccountNotFoundError(f"Account {accountId} not found in the database.")
+
+    devices = account_information.get("devices", [])
+    for device in devices:
+        device_matches = False
+
+        if identifierType == "LINE_NUMBER":
+            # Normalize the stored phone number for comparison
+            stored_phone = device.get("lineNumber")
+            if stored_phone:
+                stored_phone_normalized = normalize_phone_number(stored_phone)
+                device_matches = stored_phone_normalized == identifier
+            else:
+                device_matches = False
+        elif identifierType == "DEVICE_ID":
+            device_matches = device.get("deviceId") == identifier
+        else:
+            raise ValidationError(f"Identifier type {identifierType} not supported.")
+
+        if device_matches:
+            if not device.get("paymentPlanActive") and device.get("lineNumber") != "n/a":
+                # Create and validate the response using Pydantic model
+                try:
+                    validated_model = DeviceUpgradeEligibility(isEligible=True)
+                    return validated_model.model_dump(mode="json")
+                except Exception as e:
+                    raise ValidationError(f"Failed to create valid response: {str(e)}")
+            else:
+                # Create and validate the response using Pydantic model
+                try:
+                    ineligible_reason = (
+                        "Device is not eligible for an upgrade because payment plan is active."
+                    )
+                    if not device.get("paymentPlanActive"):
+                        ineligible_reason = (
+                            "Device is not eligible for an upgrade because lineNumber is n/a."
+                        )
+
+                    validated_model = DeviceUpgradeEligibility(
+                        isEligible=False,
+                        reason=ineligible_reason,
+                        remainingDevicePayments=device.get("paymentPlanRemainingMonths"),
+                        eligibilityDate=device.get("upgradeEligibilityDate"),
+                    )
+                    return validated_model.model_dump(mode="json")
+                except Exception as e:
+                    raise ValidationError(f"Failed to create valid response: {str(e)}")
+
+    raise ValidationError(f"Device with {identifierType} '{identifier}' not found on account.")
+
+
+@tool_spec(
+    input_model=ModifyServicePlanOrFeatureInput,
+    output_model=ServiceModificationResponse,
+    error_model=[
+        ErrorObject(
+            ValidationError,
+            [
+                "Raised when accountId, itemId, or currentPlanId is missing/invalid, the account can't be found, or the plan isn't found.",
+                "Raised when action isn't 'CHANGE_PLAN', 'ADD_FEATURE', or 'REMOVE_FEATURE'.",
+            ],
+        ),
+        ErrorObject(AccountNotFoundError, ["Raised when accountId doesn't exist in the database."]),
+        ErrorObject(ActionNotSupportedError, ["Raised when action isn't supported."]),
+        ErrorObject(
+            ServicePlanNotFoundError, ["Raised when currentPlanId isn't found on the account."]
+        ),
+    ],
+    spec={
+        "name": "modify_service_plan_or_feature",
+        "description": """ Changes a customer's service plan or adds/removes a feature from it.
+
+        When to Use:
+        - Use this after a user has looked at their options and explicitly
+        confirmed they want to make a specific change to their services.
+        - For 'CHANGE_PLAN': User says "Yes, switch me to the Unlimited Pro plan."
+        - For 'ADD_FEATURE': User says "Okay, please add the international calling
+        pass."
+        - For 'REMOVE_FEATURE': User says "I don't need the hotspot feature anymore,
+        please remove it." """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "accountId": {
+                    "type": "string",
+                    "description": """ The customer's account identifier or phone number.
+                    Example: "ACC123456789" or "222-334-4556" """,
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["CHANGE_PLAN", "ADD_FEATURE", "REMOVE_FEATURE"],
+                    "description": """ The kind of modification to run:
+                    - "CHANGE_PLAN": Swaps the current plan for the one given in itemId.
+                    - "ADD_FEATURE": Adds the feature given in itemId to the current plan.
+                    - "REMOVE_FEATURE": Removes the feature given in itemId. """,
+                },
+                "itemId": {
+                    "type": "string",
+                    "description": """ The unique identifier for the plan or feature being actioned.
+                    Examples:
+                    - For a plan: "PLAN_UNL_PRO"
+                    - For a feature: "FEAT_INTL_CALL" """,
+                },
+                "currentPlanId": {
+                    "type": "string",
+                    "description": """ The ID of the customer's current plan, so the correct plan gets replaced or modified.
+                    Example: "PLAN_UNL_PLUS" """,
+                },
+                "customerConfirmationText": {
+                    "type": "string",
+                    "description": "A summary of the change the user explicitly agreed to. Used for logging and auditing.",
+                    "nullable": True,
+                },
+            },
+            "required": ["accountId", "action", "itemId", "currentPlanId"],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary confirming the modification:",
+            "properties": {
+                "status": {"type": "string", "description": "Success status of the operation"},
+                "message": {"type": "string", "description": "Human-readable confirmation message"},
+                "orderId": {
+                    "type": "string",
+                    "description": "Unique order identifier for tracking",
+                },
+                "effectiveDate": {"type": "string", "description": "Date when changes take effect"},
+                "nextBillImpactEstimate": {
+                    "type": "string",
+                    "description": "Estimated impact on next bill",
+                },
+            },
+            "required": ["status", "message", "orderId", "effectiveDate", "nextBillImpactEstimate"],
+        },
+    },
+)
+def modify_service_plan_or_feature(
+    accountId: str,
+    action: Literal["CHANGE_PLAN", "ADD_FEATURE", "REMOVE_FEATURE"],
+    itemId: str,
+    currentPlanId: str,
+    customerConfirmationText: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Changes a customer's service plan or adds/removes a feature from it.
+
+    When to Use:
+    - Use this after a user has looked at their options and explicitly
+    confirmed they want to make a specific change to their services.
+    - For 'CHANGE_PLAN': User says "Yes, switch me to the Unlimited Pro plan."
+    - For 'ADD_FEATURE': User says "Okay, please add the international calling
+    pass."
+    - For 'REMOVE_FEATURE': User says "I don't need the hotspot feature anymore,
+    please remove it."
+
+    Args:
+        accountId (str): The customer's account identifier or phone number.
+            Example: "ACC123456789" or "222-334-4556"
+        action (Literal["CHANGE_PLAN", "ADD_FEATURE", "REMOVE_FEATURE"]): The kind of modification to run:
+            - "CHANGE_PLAN": Swaps the current plan for the one given in itemId.
+            - "ADD_FEATURE": Adds the feature given in itemId to the current plan.
+            - "REMOVE_FEATURE": Removes the feature given in itemId.
+        itemId (str): The unique identifier for the plan or feature being actioned.
+            Examples:
+            - For a plan: "PLAN_UNL_PRO"
+            - For a feature: "FEAT_INTL_CALL"
+        currentPlanId (str): The ID of the customer's current plan, so the correct plan gets replaced or modified.
+            Example: "PLAN_UNL_PLUS"
+        customerConfirmationText (Optional[str]): A summary of the change the user explicitly agreed to. Used for logging and auditing.
+
+    Returns:
+        Dict[str, Any]: Dictionary confirming the modification:
+            - status (str): Success status of the operation
+            - message (str): Human-readable confirmation message
+            - orderId (str): Unique order identifier for tracking
+            - effectiveDate (str): Date when changes take effect
+            - nextBillImpactEstimate (str): Estimated impact on next bill
+
+    Raises:
+        ValidationError: If accountId, itemId, or currentPlanId is missing/invalid, the account can't be found, or the plan isn't found.
+        ValidationError: If action isn't 'CHANGE_PLAN', 'ADD_FEATURE', or 'REMOVE_FEATURE'.
+        AccountNotFoundError: If accountId doesn't exist in the database.
+        ActionNotSupportedError: If action isn't supported.
+        ServicePlanNotFoundError: If currentPlanId isn't found on the account.
+    """
+
+    # Use utils to verify account exists
+    account_details = utils.get_account(accountId)
+    if account_details is None:
+        raise AccountNotFoundError(f"Account {accountId} not found in the database.")
+
+    account_services = account_details["services"]
+    actual_account_id = account_details["accountId"]
+
+    # For action, find the specific plan to replace using currentPlanId
+    service_to_modify = next((s for s in account_services if s["planId"] == currentPlanId), None)
+    if service_to_modify is None:
+        raise ServicePlanNotFoundError(f"Plan {currentPlanId} not found in the account.")
+
+    service_index = account_services.index(service_to_modify)
+
+    if action == "CHANGE_PLAN":
+        # Get new plan information
+        item_info = utils.get_service_plan(itemId)
+        if item_info is None:
+            raise ValidationError(f"Item {itemId} not found in the database.")
+        if item_info["type"] != "PLAN":
+            raise ValidationError(f"Item {itemId} is not a plan.")
+
+        service_to_modify.update({
+            "planName": item_info["name"],
+            "planId": item_info["id"],
+            "monthlyCost": item_info["monthlyCost"],
+            "dataAllowance": item_info["dataAllowance"],
+            "activeFeatures": [],  # Reset features when changing plan
+        })
+        message = f"Your plan has been successfully changed to {item_info['name']}"
+        bill_impact = f"${item_info['monthlyCost']} will be your next bill."
+
+        utils.update_service_plan(actual_account_id, service_index, service_to_modify)
+
+    elif action == "ADD_FEATURE":
+        # For ADD_FEATURE, add to the first/primary service plan on the account
+        if not account_services:
+            raise ValidationError("No service plans found on the account to add feature to.")
+
+        # Get feature information
+        item_info = utils.get_service_plan(itemId)
+        if item_info is None:
+            raise ValidationError(f"Item {itemId} not found in the database.")
+        if item_info["type"] != "FEATURE_ADDON":
+            raise ValidationError(f"Item {itemId} is not an add-on feature.")
+
+        feature_to_add = {
+            "featureId": item_info["id"],
+            "featureName": item_info["name"],
+            "monthlyCost": item_info["monthlyCost"],
+        }
+        if "activeFeatures" not in service_to_modify or not isinstance(
+            service_to_modify["activeFeatures"], list
+        ):
+            service_to_modify["activeFeatures"] = []
+        # Replace if already present
+        replaced = False
+        for idx, existing in enumerate(service_to_modify["activeFeatures"]):
+            if existing.get("featureId") == item_info["id"]:
+                service_to_modify["activeFeatures"][idx] = feature_to_add
+                replaced = True
+                break
+        if not replaced:
+            service_to_modify["activeFeatures"].append(feature_to_add)
+        message = f"Feature {item_info['name']} has been successfully added to your plan."
+        bill_impact = f"${item_info['monthlyCost']} will be added to your next bill."
+
+        utils.update_service_plan(actual_account_id, service_index, service_to_modify)
+
+    elif action == "REMOVE_FEATURE":
+        # For REMOVE_FEATURE, search through all services to find and remove the feature
+        feature_found = False
+        removed_feature_cost = 0
+
+        active_features = service_to_modify.get("activeFeatures", [])
+        # remove by id
+        for idx, feat in enumerate(active_features):
+            if feat.get("featureId") == itemId:
+                removed_feature_cost = feat.get("monthlyCost", 0)
+                del service_to_modify["activeFeatures"][idx]
+                utils.update_service_plan(actual_account_id, service_index, service_to_modify)
+                feature_found = True
+                break
+
+        if not feature_found:
+            raise ValidationError(
+                f"Feature {itemId} was not found for the plan {currentPlanId} and could not be removed."
+            )
+
+        message = f"Feature {itemId} has been successfully removed from your plan."
+        bill_impact = f"${removed_feature_cost} will be deducted from your next bill."
+
+    else:
+        raise ActionNotSupportedError(f"Action {action} not supported.")
+
+    # Create and validate the response using Pydantic model
+    try:
+        order = utils.create_order(account_details["accountId"], action, message)
+        validated_model = ServiceModificationResponse(
+            status="Success",
+            message=message,
+            orderId=order["orderId"],
+            effectiveDate=order["estimatedCompletionDate"],
+            nextBillImpactEstimate=bill_impact,
+        )
+        return validated_model.model_dump(mode="json")
+    except Exception as e:
+        raise ValidationError(f"Failed to create valid response: {str(e)}")
+
+
+@tool_spec(
+    input_model=QueryAvailablePlansAndFeaturesInput,
+    output_model=KnowledgeBaseQueryResponse,
+    error_model=[
+        ErrorObject(
+            ValidationError,
+            [
+                "Raised when query is missing, isn't a string, or fails validation constraints.",
+            ],
+        ),
+    ],
+    spec={
+        "name": "query_available_plans_and_features",
+        "description": """ Searches a knowledge base for details on available service plans and features.
+
+        When to Use:
+        - Use this when the user asks general, informational questions about
+          products or services that don't map to structured data you already have.
+        - Examples: "What international plans do you have?", "How much does the
+          hotspot feature cost?", "What are the benefits of the Unlimited Pro plan?".
+        - Do NOT use this to look up a specific customer's current plan;
+          use get_customer_account_details() for that. """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": """ The user's question, phrased as a clear, specific search query.
+                    Examples:
+                    - "details of Unlimited Pro plan data allowance"
+                    - "cost of international calling pass feature"
+                    - "what plans include mobile hotspot" """,
+                }
+            },
+            "required": ["query"],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary holding search results:",
+            "properties": {
+                "answer": {
+                    "type": "string",
+                    "description": "Human-readable answer to the query",
+                    "nullable": True,
+                },
+                "snippets": {
+                    "type": "array",
+                    "description": "Supporting information snippets, each containing:",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "Snippet content",
+                                "nullable": True,
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Source title",
+                                "nullable": True,
+                            },
+                            "uri": {
+                                "type": "string",
+                                "description": "Reference URL",
+                                "nullable": True,
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            "required": ["snippets"],
+        },
+    },
+)
+def query_available_plans_and_features(
+    query: str,
+) -> Dict[str, Any]:
+    """
+    Searches a knowledge base for details on available service plans and features.
+
+    When to Use:
+    - Use this when the user asks general, informational questions about
+      products or services that don't map to structured data you already have.
+    - Examples: "What international plans do you have?", "How much does the
+      hotspot feature cost?", "What are the benefits of the Unlimited Pro plan?".
+    - Do NOT use this to look up a specific customer's current plan;
+      use get_customer_account_details() for that.
+
+    Args:
+        query (str): The user's question, phrased as a clear, specific search query.
+            Examples:
+            - "details of Unlimited Pro plan data allowance"
+            - "cost of international calling pass feature"
+            - "what plans include mobile hotspot"
+
+    Returns:
+        Dict[str, Any]: Dictionary holding search results:
+            - answer (Optional[str]): Human-readable answer to the query
+            - snippets (List[Dict[str, Optional[str]]]): Supporting information snippets, each containing:
+                - text (Optional[str]): Snippet content
+                - title (Optional[str]): Source title
+                - uri (Optional[str]): Reference URL
+
+    Raises:
+        ValidationError: If query is missing, isn't a string, or fails validation constraints.
+    """
+    if DB["use_real_datastore"]:
+        response = utils.query_plans_and_features_infobot(query)
+        validated_model = KnowledgeBaseQueryResponse(
+            answer=response.get("answer"),
+            snippets=[
+                KnowledgeBaseSnippet(
+                    text=snippet.get("text"),
+                    title=snippet.get("title"),
+                    uri=snippet.get("uri"),
+                )
+                for snippet in response.get("snippets", [])
+            ],
+        )
+        return validated_model.model_dump(mode="json")
+
+    matching_plans = utils.search_plans_by_query(query)
+
+    if matching_plans:
+        answer_parts = []
+        snippets = []
+
+        for plan in matching_plans:
+            plan_info = f"{plan['name']}: {plan['description']} - ${plan['monthlyCost']}/month"
+            answer_parts.append(plan_info)
+
+            snippets.append(
+                KnowledgeBaseSnippet(
+                    text=plan["description"],
+                    title=plan["name"],
+                    uri=plan.get("termsAndConditionsUrl", "https://example.com/terms"),
+                )
+            )
+
+        answer = "Here are the available plans and features that match your query:\n" + "\n".join(
+            answer_parts
+        )
+    else:
+        answer = (
+            "I don't have specific information about that plan or feature in our current offerings."
+        )
+        snippets = []
+
+    # Create and validate the response using Pydantic model
+    try:
+        validated_model = KnowledgeBaseQueryResponse(
+            answer=answer,
+            snippets=snippets,
+        )
+        return validated_model.model_dump(mode="json")
+    except Exception as e:
+        raise ValidationError(f"Failed to create valid response: {str(e)}")
+
+
+@tool_spec(
+    input_model=QueryAccountOrdersInput,
+    output_model=KnowledgeBaseQueryResponse,
+    error_model=[
+        ErrorObject(
+            ValidationError,
+            [
+                "Raised when query or filter is missing, isn't a string, or fails validation constraints.",
+            ],
+        ),
+    ],
+    spec={
+        "name": "query_account_orders",
+        "description": """ Searches a customer's order history in a knowledge base.
+
+        When to Use:
+        - Use this when a user asks about the status of a recent order, their
+          order history, or details on a past purchase.
+        - You MUST use the `filter` parameter to scope the search to the correct
+        account. """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": """ The user's question about their orders. Examples:
+                    - "What was the shipping status of my most recent order?"
+                    - "How much did I pay for the phone I bought in May?"
+                    - "Show me my order history for the past 3 months" """,
+                },
+                "filter": {
+                    "type": "string",
+                    "description": """ An expression that scopes the search to a specific customer's
+                    account. The format MUST be "accountId='<customer_account_id>'".
+                    Example: "accountId='ACC123456789'" """,
+                },
+            },
+            "required": ["query", "filter"],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary holding order search results:",
+            "properties": {
+                "answer": {
+                    "type": "string",
+                    "description": "Response about the order history",
+                    "nullable": True,
+                },
+                "snippets": {
+                    "type": "array",
+                    "description": "Supporting order information",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "Snippet content",
+                                "nullable": True,
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Source title",
+                                "nullable": True,
+                            },
+                            "uri": {
+                                "type": "string",
+                                "description": "Reference URL",
+                                "nullable": True,
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            "required": ["snippets"],
+        },
+    },
+)
+def query_account_orders(
+    query: str,
+    filter: str,
+) -> Dict[str, Any]:
+    """
+    Searches a customer's order history in a knowledge base.
+
+    When to Use:
+    - Use this when a user asks about the status of a recent order, their
+      order history, or details on a past purchase.
+    - You MUST use the `filter` parameter to scope the search to the correct
+    account.
+
+    Args:
+        query (str): The user's question about their orders. Examples:
+            - "What was the shipping status of my most recent order?"
+            - "How much did I pay for the phone I bought in May?"
+            - "Show me my order history for the past 3 months"
+        filter (str): An expression that scopes the search to a specific customer's
+            account. The format MUST be "accountId='<customer_account_id>'".
+            Example: "accountId='ACC123456789'"
+
+    Returns:
+        Dict[str, Any]: Dictionary holding order search results:
+            - answer (Optional[str]): Response about the order history
+            - snippets (List[Dict[str, Optional[str]]]): Supporting order information with fields:
+                - text (Optional[str]): Snippet content
+                - title (Optional[str]): Source title
+                - uri (Optional[str]): Reference URL
+
+    Raises:
+        ValidationError: If query or filter is missing, isn't a string, or fails validation constraints.
+    """
+    # Validate filter format
+    if not filter.startswith("accountId='") or not filter.endswith("'"):
+        raise ValidationError("filter must be in format 'accountId='<customer_account_id>''")
+
+    if DB["use_real_datastore"]:
+        updated_query = f"{filter}: {query}"
+        response = utils.query_account_orders_infobot(updated_query)
+        validated_model = KnowledgeBaseQueryResponse(
+            answer=response.get("answer"),
+            snippets=[
+                KnowledgeBaseSnippet(
+                    text=snippet.get("text"),
+                    title=snippet.get("title"),
+                    uri=snippet.get("uri"),
+                )
+                for snippet in response.get("snippets", [])
+            ],
+        )
+        return validated_model.model_dump(mode="json")
+    # Extract account ID from filter
+    account_id = filter[11:-1]  # Remove "accountId='" from start and "'" from end
+
+    matching_orders = utils.search_account_orders_by_query(query, account_id)
+    if matching_orders:
+        answer_parts = []
+        snippets = []
+        for order in matching_orders[:3]:
+            order_info = f"{order.get('orderId', '')}: {order.get('status', '')} - {order.get('statusDescription', '')}"
+            answer_parts.append(order_info)
+            snippets.append(
+                KnowledgeBaseSnippet(
+                    text=order.get("statusDescription"),
+                    title=order.get("orderId"),
+                    uri=order.get("termsAndConditionsUrl", "https://example.com/terms"),
+                )
+            )
+        answer = "Here are the available orders that match your query:\n" + "\n".join(answer_parts)
+    else:
+        answer = "I don't have access to this order history information."
+        snippets = []
+
+    # Create and validate the response using Pydantic model
+    try:
+        validated_model = KnowledgeBaseQueryResponse(
+            answer=answer,
+            snippets=snippets,
+        )
+        return validated_model.model_dump(mode="json")
+    except Exception as e:
+        raise ValidationError(f"Failed to create valid response: {str(e)}")
+
+
+@tool_spec(
+    input_model=EscalateInput,
+    output_model=TerminalResponse,
+    error_model=[
+        ErrorObject(ValidationError, ["Raised when reason is provided but isn't a string."])
+    ],
+    spec={
+        "name": "escalate",
+        "description": """ Use this to hand the user off to a human agent.
+
+        This is a terminal action and ends the conversation.
+
+        When to Use:
+        - The user explicitly asks to speak to a human, manager, or representative.
+        - The user's request falls outside your capabilities (e.g., closing an
+          account, handling sensitive personal information, or resolving a complex
+          technical issue you aren't trained for).
+        - The user shows extreme frustration or anger you can't resolve. """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "nullable": True,
+                    "description": """ A clear, concise explanation for the escalation. This reason
+                    gets logged and shown to the human agent. Examples:
+                    - "The user wants to file a formal complaint about their billing"
+                    - "The user is requesting account closure which requires human approval"
+                    - "The user is experiencing technical issues beyond my capabilities" """,
+                }
+            },
+            "required": [],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary holding termination details:",
+            "properties": {
+                "action": {"type": "string", "description": 'The action type ("escalate")'},
+                "reason": {"type": "string", "description": "The provided escalation reason"},
+                "status": {"type": "string", "description": "Status message for the user"},
+            },
+            "required": ["action", "reason", "status"],
+        },
+    },
+)
+def escalate(reason: Optional[str] = None) -> Dict[str, str]:
+    """
+    Use this to hand the user off to a human agent.
+
+    This is a terminal action and ends the conversation.
+
+    When to Use:
+    - The user explicitly asks to speak to a human, manager, or representative.
+    - The user's request falls outside your capabilities (e.g., closing an
+      account, handling sensitive personal information, or resolving a complex
+      technical issue you aren't trained for).
+    - The user shows extreme frustration or anger you can't resolve.
+
+    Args:
+        reason (Optional[str]): A clear, concise explanation for the escalation. This reason
+            gets logged and shown to the human agent. Examples:
+            - "The user wants to file a formal complaint about their billing"
+            - "The user is requesting account closure which requires human approval"
+            - "The user is experiencing technical issues beyond my capabilities"
+
+    Returns:
+        Dict[str, str]: Dictionary holding termination details:
+            - action (str): The action type ("escalate")
+            - reason (str): The provided escalation reason
+            - status (str): Status message for the user
+
+    Raises:
+        ValidationError: If reason is provided but isn't a string.
+    """
+    ESCALATE_FALLBACK = "<placeholder reason for the escalation>"
+    recorded_reason = reason.strip() if reason and reason.strip() else ESCALATE_FALLBACK
+
+    if "_end_of_conversation_status" not in DB:
+        DB["_end_of_conversation_status"] = {}
+
+    DB["_end_of_conversation_status"]["escalate"] = {
+        "reason": recorded_reason,
+        "action": "escalate",
+        "status": "You will be connected to a human agent shortly.",
+    }
+
+    try:
+        validated_model = TerminalResponse(
+            action="escalate",
+            reason=recorded_reason,
+            status="You will be connected to a human agent shortly.",
+        )
+        return validated_model.model_dump(mode="json")
+    except Exception as e:
+        raise ValidationError(f"Failed to create valid response: {str(e)}")
+
+
+@tool_spec(
+    input_model=FailInput,
+    output_model=TerminalResponse,
+    error_model=[
+        ErrorObject(ValidationError, ["Raised when reason is provided but isn't a string."])
+    ],
+    spec={
+        "name": "fail",
+        "description": """ Ends the conversation when a request can't be fulfilled after multiple attempts.
+
+        Use this to gracefully close out the conversation when you can't
+        understand or fulfill the user's request after multiple attempts. This is a
+        terminal action.
+
+        When to Use:
+        - Only after you've tried at least twice to understand the user and are
+          still stuck.
+        - Use this if you're stuck in a loop of not understanding the user's intent.
+        - Do NOT use this if the user is frustrated; use escalate() instead. """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "nullable": True,
+                    "description": """ A clear, concise internal-facing explanation for why the task
+                    failed. Used for logging and improving the agent. Examples:
+                    - "After three attempts, I could not understand the user's request"
+                    - "User provided unclear instructions and did not respond to clarification"
+                    - "Unable to parse the user's intent from their messages" """,
+                }
+            },
+            "required": [],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary holding termination details:",
+            "properties": {
+                "action": {"type": "string", "description": 'The action type ("fail")'},
+                "reason": {"type": "string", "description": "The provided failure reason"},
+                "status": {
+                    "type": "string",
+                    "description": "Apologetic status message for the user",
+                },
+            },
+            "required": ["action", "reason", "status"],
+        },
+    },
+)
+def fail(reason: Optional[str] = None) -> Dict[str, str]:
+    """
+    Ends the conversation when a request can't be fulfilled after multiple attempts.
+
+    Use this to gracefully close out the conversation when you can't
+    understand or fulfill the user's request after multiple attempts. This is a
+    terminal action.
+
+    When to Use:
+    - Only after you've tried at least twice to understand the user and are
+      still stuck.
+    - Use this if you're stuck in a loop of not understanding the user's intent.
+    - Do NOT use this if the user is frustrated; use escalate() instead.
+
+    Args:
+        reason (Optional[str]): A clear, concise internal-facing explanation for why the task
+            failed. Used for logging and improving the agent. Examples:
+            - "After three attempts, I could not understand the user's request"
+            - "User provided unclear instructions and did not respond to clarification"
+            - "Unable to parse the user's intent from their messages"
+
+    Returns:
+        Dict[str, str]: Dictionary holding termination details:
+            - action (str): The action type ("fail")
+            - reason (str): The provided failure reason
+            - status (str): Apologetic status message for the user
+
+    Raises:
+        ValidationError: If reason is provided but isn't a string.
+    """
+    FAIL_FALLBACK = "<placeholder reason for the failure>"
+    recorded_reason = reason.strip() if reason and reason.strip() else FAIL_FALLBACK
+
+    if "_end_of_conversation_status" not in DB:
+        DB["_end_of_conversation_status"] = {}
+
+    DB["_end_of_conversation_status"]["fail"] = {
+        "reason": recorded_reason,
+        "action": "fail",
+        "status": "I'm sorry, I'm unable to help with that at the moment. Please try again later.",
+    }
+
+    try:
+        validated_model = TerminalResponse(
+            action="fail",
+            reason=recorded_reason,
+            status="I'm sorry, I'm unable to help with that at the moment. Please try again later.",
+        )
+        return validated_model.model_dump(mode="json")
+    except Exception as e:
+        raise ValidationError(f"Failed to create valid response: {str(e)}")
+
+
+@tool_spec(
+    input_model=CancelInput,
+    output_model=TerminalResponse,
+    error_model=[
+        ErrorObject(ValidationError, ["Raised when reason is provided but isn't a string."])
+    ],
+    spec={
+        "name": "cancel",
+        "description": """ Cancels the task and ends the conversation when the user asks to stop.
+
+        Use this to cancel the current task and end the conversation when
+        the user explicitly says they don't want to proceed. This is a terminal
+        action.
+
+        When to Use:
+        - The user says "never mind", "I don't want to do this anymore", "stop", or
+          "cancel". """,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "nullable": True,
+                    "description": """ A clear, concise summary of why the task was canceled,
+                    based on the user's request. Examples:
+                    - "The user stated they did not have their account information ready"
+                    - "The user changed their mind and no longer wants to proceed"
+                    - "The user asked to cancel the current operation" """,
+                }
+            },
+            "required": [],
+        },
+        "response": {
+            "type": "object",
+            "description": "Dictionary holding termination details:",
+            "properties": {
+                "action": {"type": "string", "description": 'The action type ("cancel")'},
+                "reason": {"type": "string", "description": "The provided cancellation reason"},
+                "status": {"type": "string", "description": "Confirmation message for the user"},
+            },
+            "required": ["action", "reason", "status"],
+        },
+    },
+)
+def cancel(reason: Optional[str] = None) -> Dict[str, str]:
+    """
+    Cancels the task and ends the conversation when the user asks to stop.
+
+    Use this to cancel the current task and end the conversation when
+    the user explicitly says they don't want to proceed. This is a terminal
+    action.
+
+    When to Use:
+    - The user says "never mind", "I don't want to do this anymore", "stop", or
+      "cancel".
+
+    Args:
+        reason (Optional[str]): A clear, concise summary of why the task was canceled,
+            based on the user's request. Examples:
+            - "The user stated they did not have their account information ready"
+            - "The user changed their mind and no longer wants to proceed"
+            - "The user asked to cancel the current operation"
+
+    Returns:
+        Dict[str, str]: Dictionary holding termination details:
+            - action (str): The action type ("cancel")
+            - reason (str): The provided cancellation reason
+            - status (str): Confirmation message for the user
+
+    Raises:
+        ValidationError: If reason is provided but isn't a string.
+    """
+    CANCEL_FALLBACK = "<placeholder reason for the cancellation>"
+    recorded_reason = reason.strip() if reason and reason.strip() else CANCEL_FALLBACK
+
+    if "_end_of_conversation_status" not in DB:
+        DB["_end_of_conversation_status"] = {}
+
+    DB["_end_of_conversation_status"]["cancel"] = {
+        "reason": recorded_reason,
+        "action": "cancel",
+        "status": "Okay, I have canceled this request.",
+    }
+
+    try:
+        validated_model = TerminalResponse(
+            action="cancel",
+            reason=recorded_reason,
+            status="Okay, I have canceled this request.",
+        )
+        return validated_model.model_dump(mode="json")
+    except Exception as e:
+        raise ValidationError(f"Failed to create valid response: {str(e)}")
