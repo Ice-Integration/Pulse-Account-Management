@@ -20,8 +20,20 @@ wait_for() {
   return 1
 }
 
+wait_for_response() {
+  local url="$1"
+  for _ in $(seq 1 60); do
+    if curl -sS -o /dev/null "$url" 2>/dev/null; then return 0; fi
+    sleep 2
+  done
+  echo "Timed out waiting for an HTTP response from $url" >&2
+  return 1
+}
+
 wait_for http://localhost:4001/health
 wait_for http://localhost:4003/health
+wait_for_response http://localhost:8081/accounts/plans/catalog
+wait_for_response http://localhost:4000/graphql
 
 EMAIL="e2e-$(date +%s)@pulse.local"
 REGISTER=$(curl -fsS -X POST http://localhost:4001/auth/register \
