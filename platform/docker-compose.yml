@@ -8,7 +8,9 @@ services:
     ports: ["5432:5432"]
     volumes:
       - pulse_pg:/var/lib/postgresql/data
-      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - ./infra/postgres/migrations/002_production_features.sql:/docker-entrypoint-initdb.d/002-production.sql:ro
+      - ./infra/postgres/seed.sql:/docker-entrypoint-initdb.d/003-seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pulse -d pulse"]
       interval: 5s
@@ -42,14 +44,50 @@ services:
       postgres:
         condition: service_healthy
 
+  billing:
+    build: ./services/billing
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse
+      PORT: 4003
+    ports: ["4003:4003"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  notification:
+    build: ./services/notification
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  ai:
+    build: ./services/ai
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-5-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+    ports: ["8002:8002"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   gateway:
     build: ./services/gateway
     environment:
       PORT: 4000
+      JWT_SECRET: dev-secret-change-me
       IDENTITY_URL: http://identity:4001
       ACCOUNT_URL: http://account:8081
+      BILLING_URL: http://billing:4003
+      AI_URL: http://ai:8002
     ports: ["4000:4000"]
-    depends_on: [identity, account]
+    depends_on: [identity, account, billing, ai]
 
 volumes:
   pulse_pg:
