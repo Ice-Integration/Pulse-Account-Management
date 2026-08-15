@@ -26,9 +26,9 @@ async function gql(query: string, variables: Record<string, unknown> = {}) {
 
 function App() {
   const [token, setToken] = useState(storedToken());
-  const [email, setEmail] = useState('customer@pulse.local');
-  const [password, setPassword] = useState('PulsePass123!');
-  const [accountId, setAccountId] = useState('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [accountId, setAccountId] = useState('');
   const [account, setAccount] = useState<any>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -83,12 +83,12 @@ function App() {
       <div className="authFields">
         <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email"/>
         <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password"/>
-        <button onClick={login} disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+        <button onClick={login} disabled={busy || !email || !password}>{busy ? 'Signing in…' : 'Sign in'}</button>
       </div>
     </section> : <>
       <section className="search">
-        <input value={accountId} onChange={e => setAccountId(e.target.value)} placeholder="Enter account UUID"/>
-        <button onClick={load} disabled={busy}>{busy ? 'Loading…' : 'Open account'}</button>
+        <input value={accountId} onChange={e => setAccountId(e.target.value)} placeholder="Enter your account UUID"/>
+        <button onClick={load} disabled={busy || !accountId}>{busy ? 'Loading…' : 'Open account'}</button>
       </section>
       {account && <>
         <section className="card hero"><div><p>Customer</p><h2>{account.full_name}</h2><span>{account.account_number}</span></div><strong>{account.status}</strong></section>
