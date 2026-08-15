@@ -28,7 +28,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/pulse-${{ matrix.service }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/pulse-${{ matrix.service }}:latest
+            ${{ startsWith(github.ref, 'refs/tags/v') && format('ghcr.io/{0}/pulse-{1}:latest', github.repository_owner, matrix.service) || '' }}
 
   web-builds:
     runs-on: ubuntu-latest

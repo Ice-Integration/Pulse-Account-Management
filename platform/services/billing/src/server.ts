@@ -5,7 +5,13 @@ import { z } from 'zod';
 
 const app = Fastify({ logger: true });
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL ?? 'postgres://pulse:pulse@localhost:5432/pulse' });
-const serviceKey = process.env.SERVICE_KEY ?? 'dev-service-key-change-me';
+const serviceKey = requireEnvironmentVariable('SERVICE_KEY');
+
+function requireEnvironmentVariable(name: string) {
+  const value = process.env[name];
+  if (!value?.trim()) throw new Error(`${name} must be set`);
+  return value;
+}
 
 app.addHook('onRequest', async (request, reply) => {
   if (request.url === '/health') return;

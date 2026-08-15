@@ -23,7 +23,8 @@ class AccountController {
   private final JdbcTemplate jdbc;
   private final String serviceKey;
 
-  AccountController(JdbcTemplate jdbc, @Value("${pulse.service-key:dev-service-key-change-me}") String serviceKey) {
+  AccountController(JdbcTemplate jdbc, @Value("${pulse.service-key}") String serviceKey) {
+    if (serviceKey.isBlank()) throw new IllegalStateException("pulse.service-key must be set");
     this.jdbc = jdbc;
     this.serviceKey = serviceKey;
   }

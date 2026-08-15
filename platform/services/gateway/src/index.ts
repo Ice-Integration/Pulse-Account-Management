@@ -5,8 +5,14 @@ import { jwtVerify } from 'jose';
 const accountUrl = process.env.ACCOUNT_URL ?? 'http://localhost:8081';
 const billingUrl = process.env.BILLING_URL ?? 'http://localhost:4003';
 const aiUrl = process.env.AI_URL ?? 'http://localhost:8002';
-const serviceKey = process.env.SERVICE_KEY ?? 'dev-service-key-change-me';
+const serviceKey = requireEnvironmentVariable('SERVICE_KEY');
 const jwtSecret = new TextEncoder().encode(process.env.JWT_SECRET ?? 'dev-secret-change-me');
+
+function requireEnvironmentVariable(name: string) {
+  const value = process.env[name];
+  if (!value?.trim()) throw new Error(`${name} must be set`);
+  return value;
+}
 
 type Viewer = { sub: string; role?: string; email?: string };
 type Context = { viewer: Viewer };
