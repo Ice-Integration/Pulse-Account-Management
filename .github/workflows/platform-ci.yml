@@ -27,6 +27,22 @@ jobs:
       - run: npm install
       - run: npm run build
 
+  client-builds:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [web, admin]
+    defaults:
+      run:
+        working-directory: platform/apps/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run build
+
   java-account:
     runs-on: ubuntu-latest
     defaults:
@@ -53,9 +69,11 @@ jobs:
           python-version: '3.12'
       - run: pip install -e .
       - run: python -m compileall app
+      - run: python evals/run.py
 
   compose:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: docker compose -f platform/docker-compose.yml config
+      - run: docker compose -f platform/docker-compose.yml -f platform/docker-compose.observability.yml config
