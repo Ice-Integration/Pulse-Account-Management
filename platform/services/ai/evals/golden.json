@@ -1,0 +1,20 @@
+[
+  {
+    "id": "upgrade-eligible",
+    "question": "Can I upgrade a device that has no remaining payoff?",
+    "expected_source": "Upgrade policy",
+    "expected_terms": ["upgrade", "payoff"]
+  },
+  {
+    "id": "financed-device",
+    "question": "What must happen before I upgrade a financed phone?",
+    "expected_source": "Upgrade policy",
+    "expected_terms": ["paid", "upgrade"]
+  },
+  {
+    "id": "plan-downgrade",
+    "question": "When does a plan downgrade take effect?",
+    "expected_source": "Plan change policy",
+    "expected_terms": ["billing cycle"]
+  }
+]
