@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulse
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity
+  namespace: pulse
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: identity } }
+  template:
+    metadata: { labels: { app: identity } }
+    spec:
+      containers:
+        - name: identity
+          image: ghcr.io/ice-integration/pulse-identity:latest
+          ports: [{ containerPort: 4001 }]
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: pulse-secrets, key: database-url } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: pulse-secrets, key: jwt-secret } }
+          readinessProbe: { httpGet: { path: /health, port: 4001 }, initialDelaySeconds: 5, periodSeconds: 10 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity
+  namespace: pulse
+spec:
+  selector: { app: identity }
+  ports: [{ port: 4001, targetPort: 4001 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: account
+  namespace: pulse
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: account } }
+  template:
+    metadata: { labels: { app: account } }
+    spec:
+      containers:
+        - name: account
+          image: ghcr.io/ice-integration/pulse-account:latest
+          ports: [{ containerPort: 8081 }]
+          env:
+            - name: SPRING_DATASOURCE_URL
+              valueFrom: { secretKeyRef: { name: pulse-secrets, key: jdbc-url } }
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: pulse-secrets, key: db-user } }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: pulse-secrets, key: db-password } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: account
+  namespace: pulse
+spec:
+  selector: { app: account }
+  ports: [{ port: 8081, targetPort: 8081 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: pulse
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: gateway } }
+  template:
+    metadata: { labels: { app: gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: ghcr.io/ice-integration/pulse-gateway:latest
+          ports: [{ containerPort: 4000 }]
+          env:
+            - { name: IDENTITY_URL, value: http://identity:4001 }
+            - { name: ACCOUNT_URL, value: http://account:8081 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: pulse
+spec:
+  selector: { app: gateway }
+  ports: [{ port: 80, targetPort: 4000 }]
