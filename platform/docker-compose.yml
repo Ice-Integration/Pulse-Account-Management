@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: pulse
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse
+    ports: ["5432:5432"]
+    volumes:
+      - pulse_pg:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d pulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  identity:
+    build: ./services/identity
+    environment:
+      DATABASE_URL: postgresql://pulse:pulse@postgres:5432/pulse
+      JWT_SECRET: dev-secret-change-me
+      PORT: 4001
+    ports: ["4001:4001"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  account:
+    build: ./services/account
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/pulse
+      SPRING_DATASOURCE_USERNAME: pulse
+      SPRING_DATASOURCE_PASSWORD: pulse
+      SERVER_PORT: 8081
+    ports: ["8081:8081"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    build: ./services/gateway
+    environment:
+      PORT: 4000
+      IDENTITY_URL: http://identity:4001
+      ACCOUNT_URL: http://account:8081
+    ports: ["4000:4000"]
+    depends_on: [identity, account]
+
+volumes:
+  pulse_pg:
