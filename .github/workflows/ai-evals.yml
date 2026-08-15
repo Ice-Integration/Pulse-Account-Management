@@ -9,6 +9,13 @@ on:
     branches: [main]
     paths:
       - 'platform/services/ai/**'
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: Run live RAG evals using OPENAI_API_KEY
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   offline-safety-evals:
@@ -24,22 +31,26 @@ jobs:
       - run: python evals/run.py
 
   live-rag-evals:
-    if: ${{ secrets.OPENAI_API_KEY != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_live }}
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       PULSE_AI_BASE_URL: http://localhost:8002
     steps:
       - uses: actions/checkout@v4
+      - name: Require OpenAI secret
+        run: test -n "$OPENAI_API_KEY"
       - name: Start AI evaluation stack
         working-directory: platform
         run: docker compose up -d --build postgres ai
       - name: Wait for AI service
         run: |
+          ready=0
           for i in $(seq 1 60); do
-            curl -fsS http://localhost:8002/health && break
+            if curl -fsS http://localhost:8002/health; then ready=1; break; fi
             sleep 2
           done
+          test "$ready" = "1"
       - name: Run live RAG evaluation
         working-directory: platform/services/ai
         run: python evals/run.py
