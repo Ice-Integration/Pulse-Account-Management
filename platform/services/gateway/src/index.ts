@@ -5,10 +5,27 @@ import { jwtVerify } from 'jose';
 const accountUrl = process.env.ACCOUNT_URL ?? 'http://localhost:8081';
 const billingUrl = process.env.BILLING_URL ?? 'http://localhost:4003';
 const aiUrl = process.env.AI_URL ?? 'http://localhost:8002';
+const serviceKey = process.env.SERVICE_KEY ?? 'dev-service-key-change-me';
 const jwtSecret = new TextEncoder().encode(process.env.JWT_SECRET ?? 'dev-secret-change-me');
 
 type Viewer = { sub: string; role?: string; email?: string };
 type Context = { viewer: Viewer };
+
+function privileged(viewer: Viewer) {
+  return ['support_agent', 'supervisor', 'admin'].includes(viewer.role ?? '');
+}
+
+async function authorizeAccount(accountId: string, viewer: Viewer) {
+  if (privileged(viewer)) return;
+  const owner = await internalJson(`${accountUrl}/accounts/${accountId}/owner`);
+  if (String(owner.user_id) !== viewer.sub) throw new Error('forbidden_account');
+}
+
+async function authorizeInvoice(invoiceId: string, viewer: Viewer) {
+  if (privileged(viewer)) return;
+  const result = await internalJson(`${billingUrl}/invoices/${invoiceId}/account`);
+  await authorizeAccount(String(result.account_id), viewer);
+}
 
 const schema = createSchema<Context>({
   typeDefs: /* GraphQL */ `
@@ -37,23 +54,29 @@ const schema = createSchema<Context>({
   `,
   resolvers: {
     Query: {
-      account: async (_p, { id }) => json(`${accountUrl}/accounts/${id}`),
-      plans: async () => json(`${accountUrl}/accounts/plans/catalog`),
-      orders: async (_p, { accountId }) => json(`${accountUrl}/accounts/${accountId}/orders`),
-      upgradeEligibility: async (_p, { accountId }) => json(`${accountUrl}/accounts/${accountId}/upgrade-eligibility`),
-      invoices: async (_p, { accountId }) => json(`${billingUrl}/accounts/${accountId}/invoices`),
-      supportAsk: async (_p, { question, accountId }) => json(`${aiUrl}/support/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, account_id: accountId }) }),
+      account: async (_p, { id }, ctx) => { await authorizeAccount(id, ctx.viewer); return internalJson(`${accountUrl}/accounts/${id}`); },
+      plans: async () => internalJson(`${accountUrl}/accounts/plans/catalog`),
+      orders: async (_p, { accountId }, ctx) => { await authorizeAccount(accountId, ctx.viewer); return internalJson(`${accountUrl}/accounts/${accountId}/orders`); },
+      upgradeEligibility: async (_p, { accountId }, ctx) => { await authorizeAccount(accountId, ctx.viewer); return internalJson(`${accountUrl}/accounts/${accountId}/upgrade-eligibility`); },
+      invoices: async (_p, { accountId }, ctx) => { await authorizeAccount(accountId, ctx.viewer); return internalJson(`${billingUrl}/accounts/${accountId}/invoices`); },
+      supportAsk: async (_p, { question, accountId }, ctx) => {
+        if (accountId) await authorizeAccount(accountId, ctx.viewer);
+        return json(`${aiUrl}/support/ask`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, account_id: accountId }) });
+      },
     },
     Mutation: {
-      updateAccount: async (_p, { id, phone, billingAddress }) => json(`${accountUrl}/accounts/${id}`, {
-        method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone, billingAddress }),
-      }),
-      payInvoice: async (_p, { invoiceId, amount }) => json(`${billingUrl}/invoices/${invoiceId}/pay`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ amount, provider: 'sandbox' }),
-      }),
-      requestPlanChange: async (_p, { accountId, toPlanId }, ctx) => json(`${billingUrl}/accounts/${accountId}/plan-changes`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ toPlanId, requestedBy: ctx.viewer.sub }),
-      }),
+      updateAccount: async (_p, { id, phone, billingAddress }, ctx) => {
+        await authorizeAccount(id, ctx.viewer);
+        return internalJson(`${accountUrl}/accounts/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone, billingAddress }) });
+      },
+      payInvoice: async (_p, { invoiceId, amount }, ctx) => {
+        await authorizeInvoice(invoiceId, ctx.viewer);
+        return internalJson(`${billingUrl}/invoices/${invoiceId}/pay`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ amount, provider: 'sandbox' }) });
+      },
+      requestPlanChange: async (_p, { accountId, toPlanId }, ctx) => {
+        await authorizeAccount(accountId, ctx.viewer);
+        return internalJson(`${billingUrl}/accounts/${accountId}/plan-changes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ toPlanId, requestedBy: ctx.viewer.sub }) });
+      },
     },
   },
 });
@@ -62,6 +85,12 @@ async function json(url: string, init?: RequestInit) {
   const response = await fetch(url, init);
   if (!response.ok) throw new Error(`upstream_${response.status}`);
   return response.json();
+}
+
+async function internalJson(url: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set('x-service-key', serviceKey);
+  return json(url, { ...init, headers });
 }
 
 const yoga = createYoga<Context>({
