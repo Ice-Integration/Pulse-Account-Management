@@ -5,6 +5,14 @@ import { z } from 'zod';
 
 const app = Fastify({ logger: true });
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL ?? 'postgres://pulse:pulse@localhost:5432/pulse' });
+const serviceKey = process.env.SERVICE_KEY ?? 'dev-service-key-change-me';
+
+app.addHook('onRequest', async (request, reply) => {
+  if (request.url === '/health') return;
+  if (request.headers['x-service-key'] !== serviceKey) {
+    return reply.code(401).send({ error: 'invalid_service_key' });
+  }
+});
 
 app.get('/health', async () => ({ status: 'ok', service: 'billing' }));
 
@@ -12,6 +20,13 @@ app.get('/accounts/:accountId/invoices', async (req) => {
   const { accountId } = req.params as { accountId: string };
   const { rows } = await pool.query('SELECT * FROM invoices WHERE account_id=$1 ORDER BY created_at DESC', [accountId]);
   return rows;
+});
+
+app.get('/invoices/:invoiceId/account', async (req, reply) => {
+  const { invoiceId } = req.params as { invoiceId: string };
+  const { rows } = await pool.query('SELECT account_id FROM invoices WHERE id=$1', [invoiceId]);
+  if (!rows.length) return reply.code(404).send({ error: 'invoice_not_found' });
+  return rows[0];
 });
 
 app.post('/invoices/:invoiceId/pay', async (req, reply) => {
