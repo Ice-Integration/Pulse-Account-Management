@@ -1,0 +1,17 @@
+name: Pulse E2E
+
+on:
+  pull_request:
+    paths:
+      - 'platform/**'
+      - '.github/workflows/e2e.yml'
+  workflow_dispatch:
+
+jobs:
+  authorization-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run full-stack smoke test
+        run: bash platform/tests/e2e/smoke.sh
