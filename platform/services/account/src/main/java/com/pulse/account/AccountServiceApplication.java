@@ -1,10 +1,10 @@
 package com.pulse.account;
 
-import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.http.HttpStatus;
@@ -21,10 +21,30 @@ public class AccountServiceApplication {
 @RequestMapping("/accounts")
 class AccountController {
   private final JdbcTemplate jdbc;
-  AccountController(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+  private final String serviceKey;
+
+  AccountController(JdbcTemplate jdbc, @Value("${pulse.service-key:dev-service-key-change-me}") String serviceKey) {
+    this.jdbc = jdbc;
+    this.serviceKey = serviceKey;
+  }
+
+  private void requireServiceKey(String provided) {
+    if (provided == null || !provided.equals(serviceKey)) {
+      throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid_service_key");
+    }
+  }
+
+  @GetMapping("/{id}/owner")
+  Map<String,Object> owner(@PathVariable UUID id, @RequestHeader(value = "X-Service-Key", required = false) String key) {
+    requireServiceKey(key);
+    var rows = jdbc.queryForList("SELECT user_id FROM accounts WHERE id=?", id);
+    if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "account_not_found");
+    return rows.getFirst();
+  }
 
   @GetMapping("/{id}")
-  Map<String,Object> get(@PathVariable UUID id) {
+  Map<String,Object> get(@PathVariable UUID id, @RequestHeader(value = "X-Service-Key", required = false) String key) {
+    requireServiceKey(key);
     var rows = jdbc.queryForList("SELECT id,account_number,full_name,phone,billing_address,status FROM accounts WHERE id=?", id);
     if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "account_not_found");
     var account = rows.getFirst();
@@ -34,25 +54,29 @@ class AccountController {
   }
 
   @PatchMapping("/{id}")
-  Map<String,Object> update(@PathVariable UUID id, @RequestBody AccountUpdate body) {
+  Map<String,Object> update(@PathVariable UUID id, @RequestBody AccountUpdate body, @RequestHeader(value = "X-Service-Key", required = false) String key) {
+    requireServiceKey(key);
     int updated = jdbc.update("UPDATE accounts SET phone=COALESCE(?,phone), billing_address=COALESCE(?,billing_address), updated_at=now() WHERE id=?", body.phone(), body.billingAddress(), id);
     if (updated == 0) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "account_not_found");
     jdbc.update("INSERT INTO audit_logs(actor_user_id,account_id,action,metadata) VALUES (NULL,?,'account.updated',jsonb_build_object('source','account-service'))", id);
-    return get(id);
+    return get(id, key);
   }
 
   @GetMapping("/{id}/upgrade-eligibility")
-  List<Map<String,Object>> eligibility(@PathVariable UUID id) {
+  List<Map<String,Object>> eligibility(@PathVariable UUID id, @RequestHeader(value = "X-Service-Key", required = false) String key) {
+    requireServiceKey(key);
     return jdbc.queryForList("SELECT id,line_number,model,financed,payoff_amount,upgrade_eligible_at, (NOT financed OR payoff_amount=0 OR upgrade_eligible_at<=?) AS eligible FROM devices WHERE account_id=?", OffsetDateTime.now(), id);
   }
 
   @GetMapping("/{id}/orders")
-  List<Map<String,Object>> orders(@PathVariable UUID id) {
+  List<Map<String,Object>> orders(@PathVariable UUID id, @RequestHeader(value = "X-Service-Key", required = false) String key) {
+    requireServiceKey(key);
     return jdbc.queryForList("SELECT id,type,status,total,created_at FROM orders WHERE account_id=? ORDER BY created_at DESC", id);
   }
 
   @GetMapping("/plans/catalog")
-  List<Map<String,Object>> plans() {
+  List<Map<String,Object>> plans(@RequestHeader(value = "X-Service-Key", required = false) String key) {
+    requireServiceKey(key);
     return jdbc.queryForList("SELECT id,code,name,monthly_price,description FROM plans WHERE active=true ORDER BY monthly_price");
   }
 
