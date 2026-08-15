@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /platform/services/identity
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /platform/services/gateway
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /platform/services/billing
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /platform/services/notification
+    schedule: { interval: weekly }
+  - package-ecosystem: pip
+    directory: /platform/services/ai
+    schedule: { interval: weekly }
+  - package-ecosystem: maven
+    directory: /platform/services/account
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
